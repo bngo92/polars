@@ -22,7 +22,7 @@ mod list;
 mod meta;
 pub(crate) mod names;
 mod options;
-#[cfg(all(feature = "python", feature = "serde"))]
+#[cfg(feature = "python")]
 pub mod python_udf;
 #[cfg(feature = "random")]
 mod random;
@@ -1352,17 +1352,12 @@ impl Expr {
     ///
     /// See: [`RollingAgg::rolling_quantile`]
     #[cfg(feature = "rolling_window")]
-    pub fn rolling_quantile(
-        self,
-        quantile: f64,
-        interpolation: QuantileInterpolOptions,
-        options: RollingOptions,
-    ) -> Expr {
+    pub fn rolling_quantile(self, options: RollingOptions) -> Expr {
         self.finish_rolling(
             options,
             "rolling_quantile",
             "rolling_quantile_by",
-            Arc::new(move |s, options| s.rolling_quantile(quantile, interpolation, options)),
+            Arc::new(|s, options| s.rolling_quantile(options)),
             GetOutput::float_type(),
         )
     }
@@ -1462,6 +1457,49 @@ impl Expr {
             }),
         )
         .with_fmt("rank")
+    }
+
+    #[cfg(feature = "cutqcut")]
+    pub fn cut(
+        self,
+        breaks: Vec<f64>,
+        labels: Option<Vec<String>>,
+        left_closed: bool,
+        include_breaks: bool,
+    ) -> Expr {
+        self.apply_private(FunctionExpr::Cut {
+            breaks,
+            labels,
+            left_closed,
+            include_breaks,
+        })
+    }
+
+    #[cfg(feature = "cutqcut")]
+    pub fn qcut(
+        self,
+        probs: Vec<f64>,
+        labels: Option<Vec<String>>,
+        left_closed: bool,
+        allow_duplicates: bool,
+        include_breaks: bool,
+    ) -> Expr {
+        self.apply_private(FunctionExpr::QCut {
+            probs,
+            labels,
+            left_closed,
+            allow_duplicates,
+            include_breaks,
+        })
+    }
+
+    #[cfg(feature = "rle")]
+    pub fn rle(self) -> Expr {
+        self.apply_private(FunctionExpr::RLE)
+    }
+    #[cfg(feature = "rle")]
+    pub fn rle_id(self) -> Expr {
+        self.apply_private(FunctionExpr::RLEID)
     }
 
     #[cfg(feature = "diff")]
@@ -1703,13 +1741,7 @@ impl Expr {
     /// This can lead to incorrect results if this `Series` is not sorted!!
     /// Use with care!
     pub fn set_sorted_flag(self, sorted: IsSorted) -> Expr {
-        self.apply(
-            move |mut s| {
-                s.set_sorted_flag(sorted);
-                Ok(Some(s))
-            },
-            GetOutput::same_type(),
-        )
+        self.apply_private(FunctionExpr::SetSortedFlag(sorted))
     }
 
     /// Cache this expression, so that it is executed only once per context.

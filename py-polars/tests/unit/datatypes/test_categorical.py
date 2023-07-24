@@ -240,7 +240,7 @@ def test_cast_inner_categorical() -> None:
     assert out.to_list() == [["a"], ["a", "b"]]
 
     with pytest.raises(
-        pl.ComputeError, match=r"casting to categorical not allowed in `arr.eval`"
+        pl.ComputeError, match=r"casting to categorical not allowed in `list.eval`"
     ):
         pl.Series("foo", [["a", "b"], ["a", "b"]]).list.eval(
             pl.element().cast(pl.Categorical)
@@ -411,3 +411,14 @@ def test_categorical_concat_string_cached() -> None:
     out = pl.concat([df1, df2])
     assert out.dtypes == [pl.Categorical]
     assert out["x"].to_list() == ["A", "B"]
+
+
+def test_list_builder_different_categorical_rev_maps() -> None:
+    with pl.StringCache():
+        # built with different values, so different rev-map
+        s1 = pl.Series(["a", "b"], dtype=pl.Categorical)
+        s2 = pl.Series(["c", "d"], dtype=pl.Categorical)
+
+    assert pl.DataFrame({"c": [s1, s2]}).to_dict(False) == {
+        "c": [["a", "b"], ["c", "d"]]
+    }

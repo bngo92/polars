@@ -4,6 +4,7 @@ import inspect
 import os
 import re
 import sys
+import warnings
 from collections.abc import MappingView, Sized
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Generator, Iterable, Literal, Sequence, TypeVar
@@ -28,7 +29,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from polars import DataFrame, Series
-    from polars.type_aliases import PolarsDataType, SizeUnit
+    from polars.type_aliases import PolarsDataType, PolarsIntegerType, SizeUnit
 
     if sys.version_info >= (3, 10):
         from typing import ParamSpec, TypeGuard
@@ -96,10 +97,11 @@ def is_str_sequence(
 
 
 def range_to_series(
-    name: str, rng: range, dtype: PolarsDataType | None = None
+    name: str, rng: range, dtype: PolarsIntegerType | None = None
 ) -> Series:
     """Fast conversion of the given range to a Series."""
-    return F.arange(
+    dtype = dtype or Int64
+    return F.int_range(
         start=rng.start,
         end=rng.stop,
         step=rng.step,
@@ -403,3 +405,11 @@ def _get_stack_locals(
                     return objects
         stack_frame = stack_frame.f_back
     return objects
+
+
+# this is called from rust
+def _polars_warn(msg: str) -> None:
+    warnings.warn(
+        msg,
+        stacklevel=find_stacklevel(),
+    )

@@ -991,7 +991,13 @@ class DataFrame:
         return self
 
     @classmethod
-    def _read_json(cls, source: str | Path | IOBase | bytes) -> Self:
+    def _read_json(
+        cls,
+        source: str | Path | IOBase | bytes,
+        *,
+        schema: SchemaDefinition | None = None,
+        schema_overrides: SchemaDefinition | None = None,
+    ) -> Self:
         """
         Read into a DataFrame from a JSON file.
 
@@ -1008,11 +1014,20 @@ class DataFrame:
             source = normalise_filepath(source)
 
         self = cls.__new__(cls)
-        self._df = PyDataFrame.read_json(source, False)
+        self._df = PyDataFrame.read_json(
+            source, schema=schema, schema_overrides=schema_overrides
+        )
         return self
 
     @classmethod
-    def _read_ndjson(cls, source: str | Path | IOBase | bytes) -> Self:
+    def _read_ndjson(
+        cls,
+        source: str | Path | IOBase | bytes,
+        *,
+        schema: SchemaDefinition | None = None,
+        schema_overrides: SchemaDefinition | None = None,
+        ignore_errors: bool = False,
+    ) -> Self:
         """
         Read into a DataFrame from a newline delimited JSON file.
 
@@ -1029,7 +1044,12 @@ class DataFrame:
             source = normalise_filepath(source)
 
         self = cls.__new__(cls)
-        self._df = PyDataFrame.read_ndjson(source)
+        self._df = PyDataFrame.read_ndjson(
+            source,
+            ignore_errors=ignore_errors,
+            schema=schema,
+            schema_overrides=schema_overrides,
+        )
         return self
 
     @property
@@ -1896,13 +1916,14 @@ class DataFrame:
 
     def to_dicts(self) -> list[dict[str, Any]]:
         """
-        Convert every row to a dictionary of python-native values.
+        Convert every row to a dictionary of Python-native values.
 
         Notes
         -----
-        If you have ``ns``-precision temporal values you should be aware that python
-        natively only supports up to ``us``-precision; if this matters you should export
-        to a different format.
+        If you have ``ns``-precision temporal values you should be aware that Python
+        natively only supports up to ``μs``-precision; `ns`-precision values will be
+        truncated to microseconds on conversion to Python. If this matters to your
+        use-case you should export to a different format (such as Arrow or NumPy).
 
         Examples
         --------
@@ -3095,8 +3116,9 @@ class DataFrame:
 
             tbl = pa.table(data)
 
-            # do not remove this
+            # do not remove this import!
             # needed below
+            import pyarrow.parquet  # noqa: F401
 
             pa.parquet.write_table(
                 table=tbl,
@@ -3126,11 +3148,13 @@ class DataFrame:
         Parameters
         ----------
         table_name
-            Name of the table to append to or create in the SQL database.
+            Name of the table to create or append to in the target SQL database.
+            If your table name contains special characters, it should be quoted.
         connection_uri
-            Connection uri, for example
+            Connection URI, for example:
 
-            * "postgresql://username:password@server:port/database"
+            * "postgresql://user:pass@server:port/database"
+            * "sqlite:////path/to/database.db"
         if_exists : {'append', 'replace', 'fail'}
             The insert mode.
             'replace' will create a new database table, overwriting an existing one.
@@ -3158,26 +3182,43 @@ class DataFrame:
                 cursor.adbc_ingest(table_name, self.to_arrow(), mode)
                 cursor.close()
                 conn.commit()
+
         elif engine == "sqlalchemy":
             if parse_version(pd.__version__) < parse_version("1.5"):
                 raise ModuleNotFoundError(
                     f"Writing with engine 'sqlalchemy' requires Pandas 1.5.x or higher, found Pandas {pd.__version__}."
                 )
+
             try:
                 from sqlalchemy import create_engine
             except ImportError as exc:
                 raise ImportError(
                     "'sqlalchemy' not found. Install polars with 'pip install polars[sqlalchemy]'."
                 ) from exc
+            from csv import reader as delimited_read
 
+            # the table name may also include the db schema; ensure that we identify
+            # both components and pass them through unquoted (sqlalachemy will quote)
+            table_ident = next(delimited_read([table_name], delimiter="."))
+            if len(table_ident) > 2:
+                raise ValueError(f"table_name appears to be invalid: {table_name!r}")
+            elif len(table_ident) > 1:
+                db_schema = table_ident[0]
+                table_name = table_ident[1]
+            else:
+                table_name = table_ident[0]
+                db_schema = None
+
+            # ensure conversion to pandas uses the pyarrow extension array option
+            # so that we can make use of the sql/db export without copying data
             engine_sa = create_engine(connection_uri)
-
-            # this conversion to pandas as zero-copy
-            # so we can utilize their sql utils for free
             self.to_pandas(use_pyarrow_extension_array=True).to_sql(
-                name=table_name, con=engine_sa, if_exists=if_exists, index=False
+                name=table_name,
+                schema=db_schema,
+                con=engine_sa,
+                if_exists=if_exists,
+                index=False,
             )
-
         else:
             raise ValueError(f"'engine' {engine} is not supported.")
 
@@ -4001,6 +4042,7 @@ class DataFrame:
         by: IntoExpr | Iterable[IntoExpr],
         descending: bool | Sequence[bool] = False,
         nulls_last: bool = False,
+        maintain_order: bool = False,
     ) -> DataFrame:
         """
         Return the `k` largest elements.
@@ -4019,6 +4061,10 @@ class DataFrame:
             per column by passing a sequence of booleans.
         nulls_last
             Place null values last.
+        maintain_order
+            Whether the order should be maintained if elements are equal.
+            Note that if `true` streaming is not possible and performance might be
+            worse since this requires a stable search.
 
         See Also
         --------
@@ -4066,7 +4112,13 @@ class DataFrame:
         """
         return (
             self.lazy()
-            .top_k(k, by=by, descending=descending, nulls_last=nulls_last)
+            .top_k(
+                k,
+                by=by,
+                descending=descending,
+                nulls_last=nulls_last,
+                maintain_order=maintain_order,
+            )
             .collect(
                 projection_pushdown=False,
                 predicate_pushdown=False,
@@ -4082,6 +4134,7 @@ class DataFrame:
         by: IntoExpr | Iterable[IntoExpr],
         descending: bool | Sequence[bool] = False,
         nulls_last: bool = False,
+        maintain_order: bool = False,
     ) -> DataFrame:
         """
         Return the `k` smallest elements.
@@ -4100,6 +4153,10 @@ class DataFrame:
             per column by passing a sequence of booleans.
         nulls_last
             Place null values last.
+        maintain_order
+            Whether the order should be maintained if elements are equal.
+            Note that if `true` streaming is not possible and performance might be
+            worse since this requires a stable search.
 
         See Also
         --------
@@ -4147,7 +4204,13 @@ class DataFrame:
         """
         return (
             self.lazy()
-            .bottom_k(k, by=by, descending=descending, nulls_last=nulls_last)
+            .bottom_k(
+                k,
+                by=by,
+                descending=descending,
+                nulls_last=nulls_last,
+                maintain_order=maintain_order,
+            )
             .collect(
                 projection_pushdown=False,
                 predicate_pushdown=False,
@@ -4443,7 +4506,7 @@ class DataFrame:
 
         Drop a row only if all values are null:
 
-        >>> df.filter(~pl.all(pl.all().is_null()))
+        >>> df.filter(~pl.all_horizontal(pl.all().is_null()))
         shape: (3, 3)
         ┌──────┬─────┬──────┐
         │ a    ┆ b   ┆ c    │
@@ -4597,6 +4660,15 @@ class DataFrame:
             This is slower than a default groupby.
             Settings this to ``True`` blocks the possibility
             to run on the streaming engine.
+
+            .. note::
+                Within each group, the order of rows is always preserved, regardless
+                of this argument.
+
+        Returns
+        -------
+        GroupBy
+            Object which can be used to perform aggregations.
 
         Examples
         --------
@@ -5143,7 +5215,7 @@ class DataFrame:
 
         >>> df = pl.DataFrame(
         ...     {
-        ...         "idx": pl.arange(0, 6, eager=True),
+        ...         "idx": pl.int_range(0, 6, eager=True),
         ...         "A": ["A", "A", "B", "B", "B", "C"],
         ...     }
         ... )
@@ -5739,16 +5811,17 @@ class DataFrame:
         else:
             return self._from_pydf(self._df.hstack([s._s for s in columns]))
 
-    def vstack(self, df: DataFrame, *, in_place: bool = False) -> Self:
+    @deprecated_alias(df="other")
+    def vstack(self, other: DataFrame, *, in_place: bool = False) -> Self:
         """
         Grow this DataFrame vertically by stacking a DataFrame to it.
 
         Parameters
         ----------
-        df
+        other
             DataFrame to stack.
         in_place
-            Modify in place
+            Modify in place.
 
         Examples
         --------
@@ -5781,12 +5854,19 @@ class DataFrame:
 
         """
         if in_place:
-            self._df.vstack_mut(df._df)
-            return self
-        else:
-            return self._from_pydf(self._df.vstack(df._df))
+            try:
+                self._df.vstack_mut(other._df)
+                return self
+            except RuntimeError as exc:
+                if str(exc) == "Already mutably borrowed":
+                    self._df.vstack_mut(other._df.clone())
+                    return self
+                else:
+                    raise exc
 
-    def extend(self, other: Self) -> Self:
+        return self._from_pydf(self._df.vstack(other._df))
+
+    def extend(self, other: DataFrame) -> Self:
         """
         Extend the memory backed by this `DataFrame` with the values from `other`.
 
@@ -6562,7 +6642,7 @@ class DataFrame:
         >>> df = pl.DataFrame(
         ...     {
         ...         "col1": list(ascii_uppercase[0:9]),
-        ...         "col2": pl.arange(0, 9, eager=True),
+        ...         "col2": pl.int_range(0, 9, eager=True),
         ...     }
         ... )
         >>> df
@@ -6634,7 +6714,7 @@ class DataFrame:
         if how == "horizontal":
             df = (
                 df.with_columns(
-                    (F.arange(0, n_cols * n_rows, eager=True) % n_cols).alias(
+                    (F.int_range(0, n_cols * n_rows, eager=True) % n_cols).alias(
                         "__sort_order"
                     ),
                 )
@@ -6659,6 +6739,7 @@ class DataFrame:
         by: str | Iterable[str],
         *more_by: str,
         maintain_order: bool = ...,
+        include_key: bool = ...,
         as_dict: Literal[False] = ...,
     ) -> list[Self]:
         ...
@@ -6669,6 +6750,7 @@ class DataFrame:
         by: str | Iterable[str],
         *more_by: str,
         maintain_order: bool = ...,
+        include_key: bool = ...,
         as_dict: Literal[True],
     ) -> dict[Any, Self]:
         ...
@@ -6678,6 +6760,7 @@ class DataFrame:
         by: str | Iterable[str],
         *more_by: str,
         maintain_order: bool = True,
+        include_key: bool = True,
         as_dict: bool = False,
     ) -> list[Self] | dict[Any, Self]:
         """
@@ -6692,6 +6775,8 @@ class DataFrame:
         maintain_order
             Ensure that the order of the groups is consistent with the input data.
             This is slower than a default partition by operation.
+        include_key
+            Include the columns used to partition the DataFrame in the output.
         as_dict
             Return a dictionary instead of a list. The dictionary keys are the distinct
             group values that identify that group.
@@ -6812,7 +6897,8 @@ class DataFrame:
             by.extend(more_by)
 
         partitions = [
-            self._from_pydf(_df) for _df in self._df.partition_by(by, maintain_order)
+            self._from_pydf(_df)
+            for _df in self._df.partition_by(by, maintain_order, include_key)
         ]
 
         if as_dict:
@@ -8289,9 +8375,10 @@ class DataFrame:
 
         Notes
         -----
-        If you have ``ns``-precision temporal values you should be aware that python
-        natively only supports up to ``us``-precision; if this matters you should export
-        to a different format, as this method returns only python-native values.
+        If you have ``ns``-precision temporal values you should be aware that Python
+        natively only supports up to ``μs``-precision; `ns`-precision values will be
+        truncated to microseconds on conversion to Python. If this matters to your
+        use-case you should export to a different format (such as Arrow or NumPy).
 
         Warnings
         --------
@@ -8369,9 +8456,10 @@ class DataFrame:
 
         Notes
         -----
-        If you have ``ns``-precision temporal values you should be aware that python
-        natively only supports up to ``us``-precision; if this matters you should export
-        to a different format, as this method returns only python-native values.
+        If you have ``ns``-precision temporal values you should be aware that Python
+        natively only supports up to ``μs``-precision; `ns`-precision values will be
+        truncated to microseconds on conversion to Python. If this matters to your
+        use-case you should export to a different format (such as Arrow or NumPy).
 
         Examples
         --------
@@ -8529,9 +8617,10 @@ class DataFrame:
 
         Notes
         -----
-        If you have ``ns``-precision temporal values you should be aware that python
-        natively only supports up to ``us``-precision; if this matters in your use-case
-        you should export to a different format.
+        If you have ``ns``-precision temporal values you should be aware that Python
+        natively only supports up to ``μs``-precision; `ns`-precision values will be
+        truncated to microseconds on conversion to Python. If this matters to your
+        use-case you should export to a different format (such as Arrow or NumPy).
 
         Warnings
         --------
