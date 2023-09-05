@@ -334,6 +334,26 @@ impl ChunkCast for ListChunked {
                 let chunks = cast_chunks(self.chunks(), data_type, true)?;
                 unsafe { Ok(ArrayChunked::from_chunks(self.name(), chunks).into_series()) }
             }
+            Utf8 => {
+                let s = self
+                    .into_iter()
+                    .map(|o| {
+                        if let Some(s) = o {
+                            s.utf8().map(|s| {
+                                Some(format!(
+                                    "{:?}",
+                                    s.into_iter()
+                                        .filter_map(std::convert::identity)
+                                        .collect::<Vec<_>>()
+                                ))
+                            })
+                        } else {
+                            Ok(None)
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Series::new(self.name(), s))
+            }
             _ => {
                 polars_bail!(
                     ComputeError: "cannot cast List type (inner: '{:?}', to: '{:?}')",
